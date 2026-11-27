@@ -1,29 +1,29 @@
 # Excel Parsing & Hierarchical LLM Extraction Engine
 
-Deterministic spatial decomposition, compact semantic HTML serialization, two-pass stateful vLLM extraction, and strict row-accounting reconciliation for complex enterprise spreadsheets (multi-table sheets, merged cells, hidden template ranges, and hierarchical categories/groups).
+Deterministic spatial decomposition, compact semantic HTML serialization, two-pass stateful vLLM extraction, and strict row-accounting reconciliation for complex enterprise spreadsheets (multi-table sheets, merged cells, hidden ranges, and nested hierarchies).
 
 ---
 
 ## Current Pipeline Stages
 
 1. **Stage 1 — Spatial Decomposition & Preprocessing (`preprocess/`)**
-   - **Merge resolution (`decompose.py`):** Resolves merged ranges non-destructively while filtering hidden rows and hidden `ColumnDimension` ranges (`min..max`).
-   - **Normalization (`normalize.py`):** Applies Unicode NFKC normalization, full-width space cleanup, ISO-8601 date formatting, and explicit Excel formula error tagging (`[ERROR:#DIV/0!]`, `[ERROR:#VALUE!]`).
-   - **Connected-component region detection (`detection.py`):** Detects tables in visible coordinates, detaches sheet-wide title banners that bridge disjoint tables, splits side-by-side repeated-header tables (`No | 機器名 | No | 機器名`), and reunites columns split across blank user-input `数量` columns.
-   - **Formatting & row heuristics (`formatting.py`):** Extracts bold/fill/border/indent/number-format signals and lightweight row-role hints (`section`, `header`, `total`, `data`).
+   - **Merge resolution (`decompose.py`):** Resolves merged ranges non-destructively while filtering hidden rows and hidden `ColumnDimension` ranges.
+   - **Normalization (`normalize.py`):** Applies Unicode NFKC normalization, whitespace cleanup, ISO-8601 date formatting, and explicit Excel formula error tagging (`[ERROR:...]`).
+   - **Connected-component region detection (`detection.py`):** Detects tables in visible coordinates, detaches wide title banners that bridge disjoint tables, splits side-by-side multi-table layouts, and reunites columns separated by blank intermediate columns.
+   - **Formatting & row heuristics (`formatting.py`):** Extracts font/fill/border/indent/number-format signals and lightweight row-role hints (`section`, `header`, `total`, `data`).
 2. **Stage 2 — Compact Semantic HTML Serialization (`serialize/`)**
-   - Renders each detected region into minimal HTML (`<thead>`/`<tbody>`, native `rowspan`/`colspan` over visible axes, `c="A1"` cell coordinates) with empty/hidden columns stripped.
+   - Renders each detected region into minimal HTML (`<thead>`/`<tbody>`, native `rowspan`/`colspan` over visible axes, cell coordinate attributes) with empty and hidden columns stripped.
 3. **Stage 3 — Two-Pass Stateful vLLM Extraction (`extraction/`)**
-   - **Pass 1 (Skeleton):** Classifies every non-zero row into `category_header`, `group_header`, `column_header`, `line_item`, `subtotal`, `footnote`, or `other`.
-   - **Pass 2 (Stateful Chunks):** Slices tables on category boundaries with active `ParentState` inheritance, extracts flat `line_item` records in parallel over persistent HTTP keep-alive connections, and auto-bisects on `max_tokens` truncation with accurate state propagation.
+   - **Pass 1 (Skeleton):** Classifies every non-zero row into structural roles (`category_header`, `group_header`, `column_header`, `line_item`, `subtotal`, `footnote`, or `other`).
+   - **Pass 2 (Stateful Chunks):** Slices tables on section boundaries with active `ParentState` inheritance, extracts flat records in parallel over persistent HTTP keep-alive connections, and auto-bisects on `max_tokens` truncation with accurate state propagation.
 4. **Stage 4 — Reconciliation & Tier-2 Schema Validation (`reconcile/`)**
-   - Enforces the **Row-Accounting Invariant** ($R_{\text{input}} = R_{\text{items}} \cup R_{\text{ignored}}$ with zero missing, hallucinated, duplicate, overlapping, or invalid rows), performs targeted single-chunk retries for missing rows, parses category rates, and validates every record against strict Pydantic domain models (`ImportExtraction`).
+   - Enforces the **Row-Accounting Invariant** ($R_{\text{input}} = R_{\text{items}} \cup R_{\text{ignored}}$ with zero missing, hallucinated, duplicate, overlapping, or invalid rows), performs targeted single-chunk retries for missing rows, and validates every record against strict Pydantic domain models (`ImportExtraction`).
 
 ---
 
 ## Enterprise Wrapper Architecture (Layer 1 & Layer 2)
 
-Because the pipeline has two distinct runtime profiles—**Stages 1–2 are CPU-only and finish in < 1s**, while **Stages 3–4 are GPU-bound against vLLM and take 60–180s**—enterprise integration separates **the stateless core engine (Layer 1)** from **the async service transport (Layer 2)** using a Ports & Adapters design.
+Because the pipeline has two distinct runtime profiles—**Stages 1–2 are CPU-only and finish in < 1s**, while **Stages 3–4 are GPU-bound against vLLM and take longer**—enterprise integration separates **the stateless core engine (Layer 1)** from **the async service transport (Layer 2)** using a Ports & Adapters design.
 
 ```text
 +-------------------------------------------------------------------+
@@ -52,25 +52,25 @@ Because the pipeline has two distinct runtime profiles—**Stages 1–2 are CPU-
 Layer 1 packages the pipeline as a pure, installable Python library (`excel_parsing`) with **zero web-framework or database-driver lock-in** and no mandatory local filesystem side effects.
 
 #### Core Capabilities
-- **In-memory & stream inputs:** Accepts `bytes | BinaryIO | Path` directly so callers can pass uploaded files or S3/MinIO streams without temp-file boilerplate.
+- **In-memory & stream inputs:** Accepts `bytes | bytearray | BinaryIO | Path | str` directly so callers can pass uploaded files or object-storage streams without temp-file boilerplate.
 - **Two clean entrypoints:**
   - `inspect_workbook(source, ...) -> WorkbookInspection`: Runs Stages 1–2 only (< 1s) and returns visible sheet names, detected regions, error counts, and preview HTML.
   - `extract_workbook(source, ...) -> WorkbookExtractionResult`: Runs Stages 1–4 and returns typed per-sheet `SheetReconciliation` + validated `ImportExtraction` models + timing telemetry.
 - **Parameterized PostgreSQL `json_to_recordset` Exporter (`exporters/postgres.py`):**
-  Transforms a validated `ImportExtraction` into a **single denormalized items recordset** (merging each category's `rate` onto its item rows) paired with a parameterized `INSERT INTO ... SELECT ... FROM json_to_recordset($1::json)` query body.
+  Transforms a validated extraction into a **single denormalized recordset** paired with a parameterized `INSERT INTO ... SELECT ... FROM json_to_recordset($1::json)` query body.
 
 #### Installation (Editable / Local Dependency)
 ```bash
 # Install into the current environment (with CLI `excel-parse`)
-uv pip install -e /mnt/workspace/projects/excel_parsing
+uv pip install -e .
 
 # Or add as a dependency from another uv project:
-uv add --editable /mnt/workspace/projects/excel_parsing
+uv add --editable /path/to/excel_parsing
 ```
 
 #### Example SDK Usage
 ```python
-from excel_parsing import ExcelParser, ParserConfig, extract_workbook, inspect_workbook
+from excel_parsing import ExcelParser, ParserConfig, inspect_workbook
 
 # 1. Fast Stage 1-2 inspection (< 1s, accepts Path | str | bytes | BinaryIO)
 inspection = inspect_workbook(file_bytes)
@@ -88,12 +88,10 @@ result = parser.extract(
     fail_on_accounting=True,   # raises RowAccountingError before DB write if invariant fails
 )
 
-# 3. Export single-sheet or multi-sheet workbook as parameterized PostgreSQL json_to_recordset
+# 3. Export validated records as parameterized PostgreSQL json_to_recordset
 pg_payload = result.to_pg_recordset(
-    table="equipment_catalog",
-    column_map={"id": "catalog_id", "group": "item_group"},
-    extra_columns={"import_batch_id": "$2::uuid"},
-    on_conflict="(catalog_id) DO UPDATE SET unit_price = EXCLUDED.unit_price",
+    table="target_table",
+    extra_columns={"batch_id": "$2::uuid"},
 )
 # Caller executes inside its own asyncpg / psycopg / SQLAlchemy transaction:
 # await conn.execute(pg_payload.query, *pg_payload.params, batch_id)
@@ -102,49 +100,48 @@ pg_payload = result.to_pg_recordset(
 #### CLI Usage (`excel-parse`)
 ```bash
 # Fast CPU-only workbook inspection (< 1s)
-uv run excel-parse inspect samples/catalogs/file.xlsx
+uv run excel-parse inspect path/to/workbook.xlsx
 
 # Full extraction -> emits parameterized json_to_recordset JSON bundle to stdout
-uv run excel-parse extract samples/catalogs/file.xlsx --pg-table equipment_catalog -o outputs/
+uv run excel-parse extract path/to/workbook.xlsx --pg-table target_table -o outputs/
 ```
 
 #### Parameterized `json_to_recordset` Output Contract
 ```json
 {
-  "query": "INSERT INTO equipment_catalog (import_batch_id, sheet_name, source_row, catalog_id, name, category, category_rate, item_group, unit_price, note) SELECT $2::uuid, $3::text, r.source_row, r.id, r.name, r.category, r.category_rate, r.\"group\", r.unit_price, r.note FROM json_to_recordset($1::json) AS r(source_row integer, id text, name text, category text, category_rate numeric(5,2), \"group\" text, unit_price integer, note text)",
-  "params": [
-    "[{\"source_row\":10,\"id\":null,\"name\":\"DS 400A\",\"category\":\"【DS】\",\"category_rate\":null,\"group\":null,\"unit_price\":43910,\"note\":null}]"
-  ],
-  "row_count": 397,
+  "query": "INSERT INTO target_table (...) SELECT ... FROM json_to_recordset($1::json) AS r(...)",
+  "params": ["[{...}]"],
+  "row_count": 100,
+  "table": "target_table",
   "all_accounting_passed": true
 }
 ```
 
 #### Why Keep Database Mapping at the Boundary?
 1. **Zero DB credentials in the parser:** The extraction engine never needs write credentials to consuming applications' databases.
-2. **Caller owns the transaction:** Host applications execute the query inside their own transaction boundary, attach `tenant_id` / `import_batch_id` columns, and roll back atomically if `all_accounting_passed` is `false`.
-3. **Single round-trip bulk insert & SQL-injection safety:** `json_to_recordset($1::json)` binds the entire validated array as `$1` and inserts hundreds of rows in milliseconds.
+2. **Caller owns the transaction:** Host applications execute the query inside their own transaction boundary, attach contextual identifiers (`tenant_id`, `batch_id`), and roll back atomically if `all_accounting_passed` is `false`.
+3. **Single round-trip bulk insert & SQL-injection safety:** `json_to_recordset($1::json)` binds the entire validated JSON array as `$1` and inserts rows in a single statement.
 
 ---
 
 ### Layer 2 Definition: Thin Async HTTP Microservice (FastAPI + Job Queue)
 
-Layer 2 wraps Layer 1 for polyglot services, web frontends, and multi-application deployments. Because LLM extraction takes 60–180s per workbook, **blocking HTTP `POST /extract` calls time out behind load balancers, reverse proxies, and browsers**. Layer 2 exposes an asynchronous job API with centralized vLLM backpressure.
+Layer 2 wraps Layer 1 for polyglot services, web frontends, and multi-application deployments. Because LLM extraction is long-running, **blocking HTTP `POST /extract` calls time out behind load balancers, reverse proxies, and browsers**. Layer 2 exposes an asynchronous job API with centralized vLLM backpressure.
 
 #### API Endpoints
 
 | Endpoint | Mode | Description |
 |---|---|---|
-| `POST /v1/inspect` | **Sync (< 1s)** | Runs Stages 1–2 only. Returns visible sheets, detected regions, formula error summary, and HTML preview so UIs can confirm target sheets before spending GPU tokens. |
-| `POST /v1/jobs` | **Async (`202 Accepted`)** | Accepts `.xlsx` upload (or object-storage URI), sheet filter, optional PostgreSQL target table/column mapping, and `webhook_url`. Computes SHA-256 `(file_hash + config)` for **idempotency & result caching**. |
-| `GET /v1/jobs/{job_id}` | **Sync Poll** | Returns job state (`queued`, `running`, `succeeded`, `failed`), region progress (`8/14 regions`), and final `{ validated_import, reconcile_report, pg_recordset }` bundle. |
-| `GET /v1/jobs/{job_id}/events` | **SSE Stream** | Streams live per-region completion and accounting status events to UIs. |
+| `POST /v1/inspect` | **Sync (< 1s)** | Runs Stages 1–2 only. Returns visible sheets, detected regions, formula error summary, and HTML preview before spending GPU tokens. |
+| `POST /v1/jobs` | **Async (`202 Accepted`)** | Accepts `.xlsx` upload (or object-storage URI), sheet filter, optional PostgreSQL target mapping, and `webhook_url`. Computes SHA-256 `(file_hash + config)` for **idempotency & result caching**. |
+| `GET /v1/jobs/{job_id}` | **Sync Poll** | Returns job state (`queued`, `running`, `succeeded`, `failed`), region progress, and final `{ validated_import, reconcile_report, pg_recordset }` bundle. |
+| `GET /v1/jobs/{job_id}/events` | **SSE Stream** | Streams live per-region completion and accounting status events to clients. |
 | `GET /healthz` & `/readyz` | **Sync** | Verifies service liveness, vLLM `/v1/models` reachability, and worker queue depth. |
 
 #### Operational Guarantees in Layer 2
 - **Centralized vLLM Concurrency Gate:** A single bounded worker queue (`arq` + Redis for multi-replica deployments, or an in-process bounded `asyncio.Semaphore` worker for single-node deployments) owns the global vLLM concurrency budget so simultaneous uploads from multiple apps queue cleanly instead of exhausting GPU KV-cache.
 - **Content-Addressed Idempotency:** Re-submitting an identical workbook and configuration returns the cached validated payload immediately without re-running vLLM.
-- **Artifact Persistence (Optional):** Saves compact HTML previews, per-region audit JSONs, and `_review.md` diagnostics to local storage or S3/MinIO keyed by `job_id`.
+- **Artifact Persistence (Optional):** Saves compact HTML previews, per-region audit JSONs, and review diagnostics to local storage or object storage keyed by `job_id`.
 
 ---
 
@@ -177,19 +174,19 @@ excel_parsing/                  # Installable package root (pyproject.toml)
   Packaged all stages inside the `excel_parsing` namespace (`hatchling` build backend) so there are zero top-level module collisions when installed into external projects via `uv add --editable /path/to/excel_parsing` or `uv pip install -e .`.
 - **Stateless Engine & Reusable Client (`excel_parsing/pipeline.py`, `models.py`, `exceptions.py`):**
   - Accepts `Path | str | bytes | bytearray | BinaryIO` directly in memory without temporary files.
-  - `ExcelParser.inspect()` / `inspect_workbook()`: CPU-only Stages 1–2 inspection in ~40–150 ms.
+  - `ExcelParser.inspect()` / `inspect_workbook()`: CPU-only Stages 1–2 inspection in milliseconds.
   - `ExcelParser.extract()` / `extract_workbook()`: Full Stages 1–4 extraction sharing a single `VLLMClient` HTTP keep-alive connection pool and concurrency semaphore, with `fail_on_accounting=True` (`RowAccountingError`), `content_sha256` fingerprinting, and `on_progress` callbacks.
 - **PostgreSQL `json_to_recordset` Exporter (`excel_parsing/exporters/postgres.py`):**
-  - Denormalizes `ImportExtraction` into a single flat items array with `category_rate` merged onto each item row.
-  - Emits `PostgresRecordsetPayload` (`query` + `params: [json_array_str]`) supporting `asyncpg` (`$1::json`), `psycopg` (`%s::json`), and SQLAlchemy (`:records`), plus `column_map`, `extra_columns`, `include_fields`, `on_conflict`, `returning`, `jsonb_to_recordset`, and safe quoting of SQL reserved keywords (such as `"group"`).
+  - Denormalizes validated extractions into a flat record array for bulk ingestion.
+  - Emits `PostgresRecordsetPayload` (`query` + `params: [json_array_str]`) supporting `asyncpg` (`$1::json`), `psycopg` (`%s::json`), and SQLAlchemy (`:records`), plus `column_map`, `extra_columns`, `include_fields`, `on_conflict`, `returning`, `jsonb_to_recordset`, and safe quoting of SQL reserved keywords.
   - Automatically persists `_pg_recordset.json` per sheet and `_workbook_pg_recordset.json` per workbook when `output_dir` is provided.
 - **Core Pipeline & vLLM Throughput Optimizations (`preprocess/`, `serialize/`, `extraction/`, `reconcile/`):**
-  - Strips hidden rows and openpyxl `ColumnDimension` hidden ranges (`108` hidden columns removed in multi-island templates, reducing HTML size by >60%).
-  - Splits banner-bridged and side-by-side multi-up tables (`No | 機器名 | No | 機器名`) and reunites columns split across blank `数量` columns.
-  - Uses thread-local HTTP keep-alive sockets, dynamic per-chunk `max_tokens`, slimmed Pass 1/Pass 2 schemas, stateful bisection (`advance_parent_state`), category-rate parsing, and strict row-accounting validation (`100%` pass rate across `初回` and `その他機器`).
+  - Strips hidden rows and hidden `ColumnDimension` ranges before region detection and serialization.
+  - Splits banner-bridged and side-by-side multi-table layouts and reunites columns separated across blank intermediate columns.
+  - Uses thread-local HTTP keep-alive sockets, dynamic per-chunk `max_tokens`, slimmed Pass 1/Pass 2 schemas, stateful bisection (`advance_parent_state`), and strict row-accounting validation.
 - **CLI & Test Suite (`excel_parsing/cli.py`, `tests/test_sdk.py`, `main.py`):**
-  - `excel-parse inspect <file.xlsx>` and `excel-parse extract <file.xlsx> --pg-table ...` CLI commands.
-  - Unit and offline reconciliation test suite (`python -m unittest discover -s tests -v`).
+  - `excel-parse inspect <workbook.xlsx>` and `excel-parse extract <workbook.xlsx> --pg-table ...` CLI commands.
+  - Unit and reconciliation test suite (`python -m unittest discover -s tests -v`).
 
 ---
 
@@ -197,7 +194,7 @@ excel_parsing/                  # Installable package root (pyproject.toml)
 
 ### Phase 1 — Layer 1: Core SDK & PostgreSQL `json_to_recordset` Exporter (Completed)
 1. **Built `excel_parsing/exporters/postgres.py`:**
-   - Denormalizes `ImportExtraction` (`items` joined with `categories[name].rate` -> `category_rate`).
+   - Denormalizes `ImportExtraction` records into a flat JSON recordset.
    - Generates parameterized `INSERT INTO <table> (...) SELECT ... FROM json_to_recordset($1::json) AS r(...)` SQL + JSON parameter array with custom table/column mapping, extra bind columns, and `ON CONFLICT` / `RETURNING` support.
    - Persists `_pg_recordset.json` and `_workbook_pg_recordset.json` automatically alongside `_validated_import.json`.
 2. **Built Stateless `excel_parsing/pipeline.py` SDK:**
@@ -205,7 +202,7 @@ excel_parsing/                  # Installable package root (pyproject.toml)
 3. **Added CLI Entrypoint (`excel_parsing/cli.py` + `pyproject.toml` `[project.scripts]`):**
    - Provides `excel-parse inspect` and `excel-parse extract`.
 4. **Verified Layer 1 (`tests/test_sdk.py`):**
-   - Verified in-memory stream/bytes loading, SQL identifier quoting, `category_rate` join accuracy, accounting failure gates, and multi-sheet catalog reconciliation.
+   - Verified in-memory stream/bytes loading, SQL identifier quoting, accounting failure gates, and offline reconciliation exports.
 
 ### Phase 2 — Layer 2: FastAPI Async Service & vLLM Queue Worker (Planned)
 1. **Define API Schemas (`service/models.py`):**
