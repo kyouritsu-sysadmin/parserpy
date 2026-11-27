@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "excel-parsing"
+version = "0.2.0"
+description = "Deterministic Excel decomposition, stateful vLLM extraction, row-accounting reconciliation, and PostgreSQL json_to_recordset SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl>=3.1.5",
+    "pydantic>=2.10.0",
+]
+
+[project.scripts]
+excel-parse = "excel_parsing.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["excel_parsing"]
